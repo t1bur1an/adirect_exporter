@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	ginprometheus "github.com/zsais/go-gin-prometheus"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -36,6 +37,7 @@ var (
 	login = os.Getenv("LOGIN")
 	password = os.Getenv("PASSWORD")
 	treaty = os.Getenv("TREATY")
+	listen = os.Getenv("ADDRESS") + ":" + os.Getenv("PORT")
 	Distribution = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "stocks_distribution",
@@ -64,14 +66,7 @@ func regPromMetrics() {
 	}
 }
 
-func adirect() *AdirectAnswer {
-	loginResp := new(AdirectAnswer)
-
-	url := "https://www.alfadirect.ru/api/account/authorize"
-	method := "POST"
-
-	payload := strings.NewReader("{\n	\"login\": \""+login+"\", \n	\"password\": \""+password+"\"\n}")
-
+func httpReq(url string, method string, payload io.Reader, headers map[string]string) io.ReadCloser {
 	client := &http.Client{
 	}
 	req, err := http.NewRequest(method, url, payload)
@@ -79,12 +74,38 @@ func adirect() *AdirectAnswer {
 	if err != nil {
 		fmt.Println(err)
 	}
-	req.Header.Add("Content-Type", "application/json")
+	for key, value := range headers {
+		req.Header.Add(key, value)
+	}
 
 	res, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
 	defer res.Body.Close()
 
-	err = json.NewDecoder(res.Body).Decode(&loginResp)
+	reader, err := gzip.NewReader(res.Body)
+	defer reader.Close()
+	if err != nil {
+		panic(err)
+	}
+
+	return reader
+}
+
+func adirect() *AdirectAnswer {
+	loginResp := new(AdirectAnswer)
+
+	loginHttp := httpReq(
+		"https://www.alfadirect.ru/api/account/authorize",
+		"POST",
+		strings.NewReader("{\n	\"login\": \""+login+"\", \n	\"password\": \""+password+"\"\n}"),
+		map[string]string{
+			"Content-Type": "application/json",
+			"Accept-Encoding": "gzip, deflate, br",
+		},
+		)
+	err := json.NewDecoder(loginHttp).Decode(&loginResp)
 	if err != nil {
 		panic(err)
 	}
@@ -95,39 +116,27 @@ func adirect() *AdirectAnswer {
 func AdirectAmount(loginAnswer *AdirectAnswer) {
 	accAmount := new(AdirectClientAcc)
 
-	url := "https://lk.alfadirect.ru/api/client/chart/"+treaty
-	method := "GET"
+	amountHttp := httpReq(
+		"https://lk.alfadirect.ru/api/client/chart/"+treaty,
+		"GET",
+		nil,
+		map[string]string{
+			"Accept": "application/json, text/javascript, */*; q=0.01",
+			"Accept-Encoding": "gzip, deflate, br",
+			"Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7,bg;q=0.6,ca;q=0.5,fr;q=0.4,sq;q=0.3,de;q=0.2",
+			"Cache-Control": "no-cache",
+			"Connection": "keep-alive",
+			"Content-Type": "application/json",
+			"Cookie": ".AD4AuthCookie="+loginAnswer.Ticket,
+			"Host": "lk.alfadirect.ru",
+			"Referer": "https://lk.alfadirect.ru/",
+			"Sec-Fetch-Dest": "empty",
+			"Sec-Fetch-Mode": "cors",
+			"Sec-Fetch-Site": "same-origin",
+		},
+	)
 
-	client := &http.Client{
-	}
-	req, err := http.NewRequest(method, url, nil)
-
-	if err != nil {
-		fmt.Println(err)
-	}
-	req.Header.Add("Accept", "application/json, text/javascript, */*; q=0.01")
-	req.Header.Add("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Add("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7,bg;q=0.6,ca;q=0.5,fr;q=0.4,sq;q=0.3,de;q=0.2")
-	req.Header.Add("Cache-Control", "no-cache")
-	req.Header.Add("Connection", "keep-alive")
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Cookie", ".AD4AuthCookie="+loginAnswer.Ticket)
-	req.Header.Add("Host", "lk.alfadirect.ru")
-	req.Header.Add("Referer", "https://lk.alfadirect.ru/")
-	req.Header.Add("Sec-Fetch-Dest", "empty")
-	req.Header.Add("Sec-Fetch-Mode", "cors")
-	req.Header.Add("Sec-Fetch-Site", "same-origin")
-
-	res, err := client.Do(req)
-	defer res.Body.Close()
-
-	reader, err := gzip.NewReader(res.Body)
-	defer reader.Close()
-	if err != nil {
-		panic(err)
-	}
-
-	err = json.NewDecoder(reader).Decode(&accAmount)
+	err := json.NewDecoder(amountHttp).Decode(&accAmount)
 	if err != nil {
 		panic(err)
 	}
@@ -153,7 +162,6 @@ func main() {
 	regPromMetrics()
 	go gatherData()
 
-	listen := os.Getenv("ADDRESS") + ":" + os.Getenv("PORT")
 	err := r.Run(listen)
 	if err != nil {
 		panic(err)
